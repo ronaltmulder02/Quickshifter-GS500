@@ -12,6 +12,7 @@
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.4 system-ui, sans-serif; padding:16px; max-width:560px; margin-inline:auto; }
   h1 { font-size:20px; margin:0 0 12px; }
+  h2 { font-size:16px; margin:0 0 4px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px; }
   button { font:inherit; border:0; border-radius:8px; padding:10px 14px; background:var(--accent); color:#fff; cursor:pointer; }
   button.secondary { background:transparent; color:var(--accent); border:1px solid var(--accent); }
@@ -30,7 +31,8 @@
   .val { float:right; font-variant-numeric:tabular-nums; font-weight:400; color:var(--muted); }
   select, input[type=checkbox] { font:inherit; }
   #state { font-weight:700; }
-  .idle { color:var(--muted); } .cutting { color:var(--bad); } .lockout { color:var(--warn); }
+  .idle { color:var(--muted); } .cutting { color:var(--bad); } .lockout { color:var(--warn); } .limiter { color:var(--bad); }
+  .note { color:var(--muted); font-size:13px; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -56,6 +58,7 @@
 </div>
 
 <div class="card" id="settings">
+  <h2>Quickshifter</h2>
   <label>Threshold <small>counts above zero</small><span class="val" id="v_threshold"></span>
     <input type="range" id="threshold" min="10" max="3000" step="10"></label>
   <label>Cut time <small>ms</small><span class="val" id="v_cutMs"></span>
@@ -70,7 +73,19 @@
     <input type="range" id="ppr100" min="10" max="400" step="5"></label>
   <label>Upshift direction
     <select id="direction"><option value="0">Force counts go up</option><option value="1">Force counts go down</option></select></label>
-  <label><input type="checkbox" id="enabled"> Quickshifter enabled <small>(off = bypass, never cuts)</small></label>
+  <label><input type="checkbox" id="enabled"> Enabled <small>(off = bypass, nothing ever cuts)</small></label>
+</div>
+
+<div class="card">
+  <h2>Rev limiter and pops</h2>
+  <label><input type="checkbox" id="limMode"> Rev limiter on <small>(off by default)</small></label>
+  <label>Limiter RPM<span class="val" id="v_limRpm"></span>
+    <input type="range" id="limRpm" min="3000" max="12000" step="100"></label>
+  <label>Cut time <small>ms, longer = bigger bangs</small><span class="val" id="v_limCutMs"></span>
+    <input type="range" id="limCutMs" min="10" max="150" step="5"></label>
+  <label>Spark on between cuts <small>ms, shorter = more bangs per second</small><span class="val" id="v_limGapMs"></span>
+    <input type="range" id="limGapMs" min="10" max="200" step="5"></label>
+  <div class="note">Start with 40 / 40 ms and the limiter 500 rpm under your real limit. Test on a stand first. The limiter only works while the RPM reading is valid.</div>
   <div class="row" style="margin-top:16px">
     <button id="read" disabled>Read from device</button>
     <button id="save" disabled>Save to device</button>
@@ -84,7 +99,7 @@ const LIVE    = '6e7d0003-b5a3-f393-e0a9-e50e24dcca9e';
 const $ = id => document.getElementById(id);
 let device, cfgChar, liveChar;
 
-const FIELDS = ['threshold','cutMs','lockoutMs','rpmMin','rpmMax','ppr100'];
+const FIELDS = ['threshold','cutMs','lockoutMs','rpmMin','rpmMax','ppr100','limRpm','limCutMs','limGapMs'];
 function showVals() {
   FIELDS.forEach(f => { $('v_' + (f === 'ppr100' ? 'ppr' : f)).textContent = f === 'ppr100' ? ($(f).value / 100).toFixed(2) : $(f).value; });
   $('tmark').style.left = (50 + 50 * Math.min(1, $('threshold').value / 3000)) + '%';
@@ -92,26 +107,32 @@ function showVals() {
 FIELDS.forEach(f => $(f).addEventListener('input', showVals));
 showVals();
 
+// 19 bytes, little endian. Must match struct Config in quickshifter.ino
 function decodeConfig(dv) {
   return { threshold: dv.getInt16(0, true), cutMs: dv.getUint16(2, true), lockoutMs: dv.getUint16(4, true),
            rpmMin: dv.getUint16(6, true), rpmMax: dv.getUint16(8, true), ppr100: dv.getUint16(10, true),
-           direction: dv.getUint8(12), enabled: dv.getUint8(13) };
+           direction: dv.getUint8(12), enabled: dv.getUint8(13),
+           limRpm: dv.getUint16(14, true), limCutMs: dv.getUint8(16), limGapMs: dv.getUint8(17), limMode: dv.getUint8(18) };
 }
 function encodeConfig() {
-  const b = new ArrayBuffer(14), dv = new DataView(b);
+  const b = new ArrayBuffer(19), dv = new DataView(b);
   dv.setInt16(0, +$('threshold').value, true); dv.setUint16(2, +$('cutMs').value, true);
   dv.setUint16(4, +$('lockoutMs').value, true); dv.setUint16(6, +$('rpmMin').value, true);
   dv.setUint16(8, +$('rpmMax').value, true); dv.setUint16(10, +$('ppr100').value, true);
   dv.setUint8(12, +$('direction').value); dv.setUint8(13, $('enabled').checked ? 1 : 0);
+  dv.setUint16(14, +$('limRpm').value, true); dv.setUint8(16, +$('limCutMs').value);
+  dv.setUint8(17, +$('limGapMs').value); dv.setUint8(18, $('limMode').checked ? 1 : 0);
   return b;
 }
 function applyConfig(c) {
   FIELDS.forEach(f => $(f).value = c[f]);
-  $('direction').value = c.direction; $('enabled').checked = !!c.enabled; showVals();
+  $('direction').value = c.direction; $('enabled').checked = !!c.enabled; $('limMode').checked = !!c.limMode; showVals();
 }
 
 async function readConfig() {
-  applyConfig(decodeConfig(await cfgChar.readValue()));
+  const dv = await cfgChar.readValue();
+  if (dv.byteLength < 19) throw new Error('Firmware is older than this page. Flash the new quickshifter.ino.');
+  applyConfig(decodeConfig(dv));
   $('status').textContent = 'Settings read from device';
 }
 async function saveConfig() {
@@ -123,7 +144,7 @@ async function saveConfig() {
 function onLive(e) {
   const dv = e.target.value, force = dv.getInt16(0, true), rpm = dv.getUint16(2, true), st = dv.getUint8(4);
   $('force').textContent = force; $('rpm').textContent = rpm;
-  const s = ['idle', 'cutting', 'lockout'][st] || '?';
+  const s = ['idle', 'cutting', 'lockout', 'limiter'][st] || '?';
   $('state').textContent = s; $('state').className = s;
   const frac = Math.max(-1, Math.min(1, force / 3000)), bar = $('fbar');
   bar.style.left = (frac >= 0 ? 50 : 50 + frac * 50) + '%'; bar.style.width = Math.abs(frac) * 50 + '%';
